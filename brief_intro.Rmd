@@ -1,0 +1,427 @@
+---
+title: "Brief machine learning intro with R and H2O"
+author: "Maximilian Stroh"
+date: "Data User Group - 05. Sept. 2019"
+output: 
+  beamer_presentation: 
+    theme: "default"
+    colortheme: "rose"
+    fonttheme: "serif"
+    includes: 
+      in_header: header_pagenrs.tex
+    # smaller: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo=F, warning=FALSE, message=FALSE, results="hide"}
+rm(list=ls(all=T))
+library(magrittr)
+library(knitr)
+library(kableExtra)
+library(rpart)
+library(rpart.plot)
+library(h2o)
+```
+
+
+# Outlook
+
+ - Load and inspect dataset on fuel efficiency of cars
+ - Use machine learning to predict fuel efficiency
+ - Understand a fitted machine learning model
+
+
+# Fuel efficiency data
+
+ - Use dataset included in the package 'ggplot2' called __mpg__
+ - Includes information about different cars and their fuel efficiency measured by miles per gallon
+
+\small
+
+__Column__   | __Explanation__
+------------ | ---------------
+manufacturer |
+model        | 
+displ        | engine displacement, in litres
+year         | year of manufacture
+cyl          | number of cylinders
+trans        | type of transmission
+drv          | f = front-wheel drive, r = rear wheel drive, 4 = 4wd
+cty          | city miles per gallon
+hwy          | highway miles per gallon
+fl           | fuel type
+class        | type of car
+
+# Quick look into the dataset
+
+\small
+
+```{r}
+mpg = ggplot2::mpg
+```
+```{r eval=F}
+mpg[c(1,51,101,151,201),]
+```
+```{r echo=F}
+kable(mpg[c(1,51,101,151,201),],format="latex",
+             booktabs=T) %>%
+  kable_styling(latex_options = "scale_down")
+
+```
+
+
+
+# Basic statistics about the dataset
+
+ - Numeric columns look well behaved, no outlier treatment or robust method required
+
+\tiny
+
+```{r}
+summary(mpg)
+```
+\normalsize
+
+<!-- # Transforming character columns to factors -->
+
+```{r, include=F}
+mpg$manufacturer = as.factor(mpg$manufacturer)
+mpg$model = as.factor(mpg$model)
+mpg$trans = as.factor(mpg$trans)
+mpg$drv   = as.factor(mpg$drv)
+mpg$fl    = as.factor(mpg$fl)
+mpg$class = as.factor(mpg$class)
+```
+
+# Put away some test data
+
+\small
+
+```{r}
+## 75% of the sample size
+smpSize <- floor(0.75 * nrow(mpg))
+
+## set the seed to make your partition reproducible
+set.seed(123)
+trainInd <- sample(seq_len(nrow(mpg)), size = smpSize)
+
+trainData <- mpg[trainInd, ]
+testData <- mpg[-trainInd, ]
+```
+
+- Financial data often has a time dimension. Don't use simple random sampling to generate a test set in this case!
+
+# Regression trees - Simplest possible tree
+
+\small
+
+```{r}
+tree1 = rpart(cty ~ displ + year + cyl + trans 
+                     + drv + fl + class, trainData, 
+                     model = T, 
+                     control = rpart.control(maxdepth = 1))
+
+prp(tree1)
+```
+
+# Tree of depths 2
+
+```{r}
+tree2 = rpart(cty ~ displ + year + cyl + trans + drv 
+             + fl + class, trainData, model = T, 
+             control = rpart.control(maxdepth = 2))
+```
+```{r echo=F}
+prp(tree2)
+```
+
+# Evaluating prediction performance on test set
+
+\tiny
+
+```{r}
+x = c("displ","year","cyl","trans","drv","fl","class")
+
+# use depth 1 regression tree to predict cyl on test set
+testPrediction = predict(tree1, testData[,x])
+
+# calc squared errors
+predEvaluation = as.data.frame(cbind(testData$displ,testData$cty,testPrediction,
+                                     (testData$cty - testPrediction)**2))
+colnames(predEvaluation) = c("displ","realized","predicted","squared_error")
+```
+```{r echo=F}
+knitr::kable(head(predEvaluation),format="latex",booktabs=T)
+```
+```{r}
+# calc root mean squared error
+sqrt(mean(predEvaluation$squared_error))
+```
+
+
+# From tree to forest
+
+- Simple regression trees as shown above are the basis for better performing methods
+- One example is the __Random Forest__ algorithm
+- It combines forecasts from many trees
+- Trees are grown _independently_
+    + Draws different bootstrap samples of data, fits regression tree to each sample, then averages forecasts (_bagging_)
+    + At each split, only random sample of features is used as split candidates, thus further decorrelates trees
+- Uses larger trees and averages over them to reduce variance
+    
+# R package "h2o"
+
+- Comes with a couple of popular machine learning algorithms
+    + Lasso, Ridge Regression, Random Forest, Gradient Boosting, Neural Nets...
+- Estimates models on all cores of your machine
+- Easy to set up on multiple machines to estimate a distributed model (for big data)
+- Includes methods to understand a fitted model
+- Limited capabilities in NN/Deep Learning
+
+# Replicating a single tree with the Random Forest algorithm
+
+\small
+
+```{r warning=FALSE, message=FALSE, results="hide"}
+# start h2o instance on this computer (requires Java)
+h2o.init()
+# upload data to h2o instance
+h2o.train = as.h2o(trainData)
+h2o.test  = as.h2o(testData)
+
+
+# replication of simple regression tree with depth = 1
+h2o.RF1 = h2o.randomForest(x,"cty",h2o.train,
+                           ntrees = 1,max_depth = 1,
+                           mtries=7,sample_rate =1,
+                           col_sample_rate_per_tree=1,
+                           nbins=175,
+                           build_tree_one_node = T)
+
+```
+
+# Use fitted Random Forest model to predict on test set
+
+\small
+
+```{r warning=FALSE, message=FALSE, results="hide"}
+# predict miles per galon for city usage on test set
+h2o.RF1.pred = as.data.frame(h2o.predict(h2o.RF1,h2o.test))
+
+# compare predictions to previous model
+predEvaluation = cbind(predEvaluation,h2o.RF1.pred)
+
+# name added column
+colnames(predEvaluation)[5] = "predicted_h2o"
+```
+
+
+# Successful replication of previous 1-split toy example
+
+\small
+
+```{r warning=F,message=F,echo=F}
+# plot start predictions table
+knitr::kable(head(predEvaluation),format="latex",booktabs=T)
+```
+
+```{r}
+# calculate prediction performance stats on test set
+h2o.RF1.perf = h2o.performance(h2o.RF1,h2o.test)
+# display root mean squared error
+h2o.RF1.perf@metrics$RMSE
+```
+
+# Fit real Random Forest
+
+\small
+
+- Random Forest algorithm has many "hyperparameters""
+- Two important ones are
+    + __`ntrees`__ Number of trees to fit to average over
+    + __`max_depth`__ Size of each tree
+
+```{r warning=FALSE, message=FALSE, results="hide"}
+# use 50 trees, with depth up to 20 (h2o defaults)
+h2o.RF = h2o.randomForest(x,"cty",h2o.train,
+                          ntrees = 50, 
+                          max_depth = 10,
+                          seed = 123)
+
+```
+
+# Prediction error is halfed compared to toy example
+```{r}
+# calculate prediction performance stats on test set
+h2o.RF.perf = h2o.performance(h2o.RF,h2o.test)
+# display root mean squared error
+h2o.RF.perf@metrics$RMSE
+```
+
+# Tuning: How to chose the right hyperparameters?
+
+- __Never__ look at the test set and play around until it works
+    + Now you have fitted the hyperparameters on the test set
+    + No more data left to see if it really works on new data
+    + Can be OK if you can easily collect new data for final test
+- Need some criterion to chose hyperparameters based only on training set
+- Basic idea: Split your training set again, estimate on one part, evaluate on another
+- Can do this multiple times to have enough training data to estimate the model on
+- Popular choice: 5-fold cross validation
+    + Split trainig set into 5 parts
+    + Train on 4/5 of data, evaluate on 1/5
+    + Do this 5 times, average over results
+    
+
+# 5-fold cross validation in one picture
+
+![5-fold cross validation](CV.PNG)
+    
+# Calc CV-stats while training the model
+
+\small
+
+```{r warning=FALSE, message=FALSE, results="hide"}
+# Fit model and calc 5-fold cross validation performance
+h2o.RF = h2o.randomForest(x,"cty",h2o.train,
+                          ntrees = 50, max_depth = 10,
+                          nfolds = 5, seed = 123)
+```
+
+```{r}
+cvMetrics = h2o.RF@model$cross_validation_metrics_summary[6,]
+```
+
+```{r echo=F}
+cvMetrics %<>% lapply(as.numeric) %>% 
+               lapply(round,4) %>% as.data.frame
+
+kable(cvMetrics,format="latex",booktabs=T,
+             caption="RMSE on cross-validation subsets") %>%
+  kable_styling(latex_options = "scale_down")
+```
+
+# Use cross validation RMSEs to optimize hyperparameters
+
+\small
+
+```{r}
+# Define possible value of hyperparameters
+set.seed(123); RF_params = 
+  list(ntrees = round(exp(runif(5,log(10),log(1000)))),
+       max_depth = round(exp(runif(5,log(1),log(50)))))
+```
+
+```{r echo=F}
+print(RF_params)
+```
+
+
+# Cross-validate all 25 Random Forest models
+
+\small
+
+```{r warning=FALSE, message=FALSE, results="hide"}
+# Train and validate a cartesian grid of GBMs
+RF_grid = h2o.grid("randomForest", x = x, y = "cty",
+                      grid_id = "RF_grid",
+                      training_frame = h2o.train,
+                      nfolds = 5,
+                      seed = 123,
+                      hyper_params = RF_params)
+```
+
+- H2O will train models for all possible combinations
+- i.e. $(38,1),(38,8),\ldots,(760,9),(760,6)$
+- This is called a 'Cartesian' grid
+- It is not the most effcient tuning method in most cases
+- But easy to understand and OK for searching across just 2 hyperparameters
+
+# Show cross-validation RMSE for best of the 25 models
+
+\small
+
+```{r}
+RF_gridperf = h2o.getGrid(grid_id = "RF_grid",
+                             sort_by = "RMSE",
+                             decreasing = F)
+```
+```{r echo=F}
+head(RF_gridperf@summary_table)
+```
+
+- Remember: These are not test set RMSEs
+- It is not a given, that the best model in CV is also best on test set
+- In particular when train and test set could not be created by random split as with financial data
+
+# How well is the best model doing on the test set?
+
+\small
+
+```{r}
+# Evaluate best model from CV on test set
+best_RF = h2o.getModel(RF_gridperf@summary_table$model_ids[1])
+best_RF_perf = h2o.performance(model = best_RF,
+                                  newdata = h2o.test)
+h2o.rmse(best_RF_perf)
+```
+
+- Barely an improvement compared to RF with default parameters with RMSE of 1.09
+- Depending on the data, tuning can help more or less
+- Often only a second order effect compared to choice of features
+
+
+# Engine displacement and number of cylinders most important features
+
+\small
+
+```{r}
+h2o.varimp_plot(best_RF)
+```
+
+Engine displacement and number of cylinders seem to be most important drivers of fuel efficency
+
+# Sensitivity analysis
+
+\small
+
+```{r warning=FALSE, message=FALSE, results="hide", echo=F}
+par(mfrow=c(2,2))
+h2o.partialPlot(best_RF,h2o.train,"displ")
+h2o.partialPlot(best_RF,h2o.train,"cyl")
+h2o.partialPlot(best_RF,h2o.train,"class")
+h2o.partialPlot(best_RF,h2o.train,"drv")
+```
+
+Charts created with function `h2o.partialPlot`.
+
+# Further reading
+
+\small
+
+- http://docs.h2o.ai/h2o/latest-stable/h2o-docs/index.html
+- https://www.h2o.ai/wp-content/uploads/2018/01/RBooklet.pdf
+- https://github.com/maximilianstroh/henley_dudes
+
+<!-- # H2O can also search over over machine learning algorithms -->
+
+<!-- \small -->
+
+<!-- ```{r warning=FALSE, message=FALSE, results="hide"} -->
+<!-- h2o.tunedAll = h2o.automl(x,"cty",h2o.train,nfolds = 5,max_runtime_secs = 300) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # calculate prediction performance stats on test set -->
+<!-- h2o.tunedAll.perf = h2o.performance(h2o.tunedAll@leader,h2o.test) -->
+<!-- # display root mean squared error -->
+<!-- h2o.rmse(h2o.tunedAll.perf) -->
+<!-- ``` -->
+
+```{r, echo=F, warning=FALSE, message=FALSE, results="hide"}
+h2o.rm("RF_grid")
+```
